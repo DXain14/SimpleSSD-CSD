@@ -8,7 +8,10 @@ This source tree is based on:
 - Local CSD working revision: the CSD changes recorded in
   [`CSD_MODIFICATIONS.md`](CSD_MODIFICATIONS.md)
 
-The publication plan is a GitHub fork under the original project engineer's
-personal account. The final GitHub owner, repository name, and remote URL are
-recorded when the fork is created. This repository must not be presented as an
+Published fork:
+
+- Repository: `https://github.com/DXain14/SimpleSSD-CSD`
+- CSD commit: `1c886626d5abecdc87d69ba7388db4a26869e6b8`
+
+This repository is an unofficial fork and must not be presented as an
 official SimpleSSD release.

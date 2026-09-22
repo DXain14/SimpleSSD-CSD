@@ -15,9 +15,8 @@ This repository is not an official SimpleSSD release.
 ## CSD extension
 
 The CSD extension adds the files and changes listed in
-[`CSD_MODIFICATIONS.md`](CSD_MODIFICATIONS.md). The release owner must record
-the legally authorized CSD copyright holder or contributors before public
-distribution.
+[`CSD_MODIFICATIONS.md`](CSD_MODIFICATIONS.md). The published CSD
+modifications are attributed to the release owner below.
 
 Copyright (C) 2026 DXain14
 
