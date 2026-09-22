@@ -12,6 +12,8 @@ x64/
 .vscode/
 
 # CMake Specific
+/build/
+/build-*/
 CMakeCache.txt
 CMakeFiles
 CMakeScripts
@@ -32,3 +34,14 @@ temp_build/
 # Library output
 libsimplessd.a
 libmcpat.a
+
+# Release artifacts and local research material
+*.tar.gz
+*.whl
+*.pdf
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
