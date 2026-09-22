@@ -40,9 +40,15 @@ FTL::FTL(ConfigReader &c, DRAM::AbstractDRAM *d) : conf(c), pDRAM(d) {
   param.ioUnitInPage = palparam->pageInSuperPage;
   param.pageCountToMaxPerf = palparam->superBlock / palparam->block;
 
+  arrayStore.setUnitSize(
+      param.pageSize /
+      (conf.readBoolean(CONFIG_FTL, FTL_USE_RANDOM_IO_TWEAK)
+           ? param.ioUnitInPage
+           : 1));
+
   switch (conf.readInt(CONFIG_FTL, FTL_MAPPING_MODE)) {
     case PAGE_MAPPING:
-      pFTL = new PageMapping(conf, param, pPAL, pDRAM);
+      pFTL = new PageMapping(conf, param, pPAL, pDRAM, &arrayStore);
       break;
   }
 
@@ -89,6 +95,16 @@ void FTL::trim(Request &req, uint64_t &tick) {
   tick += applyLatency(CPU::FTL, CPU::TRIM);
 }
 
+bool FTL::readPayload(Request &req, uint8_t *buffer, uint64_t &tick,
+                      bool strict, bool applyFlashLatency) {
+  return pFTL->readPayload(req, buffer, tick, strict, applyFlashLatency);
+}
+
+bool FTL::getPhysicalExtents(Request &req, std::vector<PhysicalExtent> &extents,
+                             bool strict) {
+  return pFTL->getPhysicalExtents(req, extents, strict);
+}
+
 void FTL::format(LPNRange &range, uint64_t &tick) {
   pFTL->format(range, tick);
 
@@ -106,16 +122,19 @@ uint64_t FTL::getUsedPageCount(uint64_t lpnBegin, uint64_t lpnEnd) {
 void FTL::getStatList(std::vector<Stats> &list, std::string prefix) {
   pFTL->getStatList(list, prefix + "ftl.");
   pPAL->getStatList(list, prefix);
+  arrayStore.getStatList(list, prefix + "csd.");
 }
 
 void FTL::getStatValues(std::vector<double> &values) {
   pFTL->getStatValues(values);
   pPAL->getStatValues(values);
+  arrayStore.getStatValues(values);
 }
 
 void FTL::resetStatValues() {
   pFTL->resetStatValues();
   pPAL->resetStatValues();
+  arrayStore.resetStatValues();
 }
 
 }  // namespace FTL

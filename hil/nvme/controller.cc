@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include "hil/nvme/interface.hh"
 #include "hil/nvme/ocssd.hh"
@@ -150,6 +151,10 @@ Controller::Controller(Interface *intrface, ConfigReader &c)
 }
 
 Controller::~Controller() {
+  while (!pendingCompletionContexts.empty()) {
+    releaseCompletionContext(pendingCompletionContexts.front());
+  }
+
   delete pSubsystem;
 
   for (uint16_t i = 0; i < cqsize; i++) {
@@ -1704,12 +1709,46 @@ void Controller::reserveCompletion() {
   }
 }
 
-void Controller::completion() {
-  struct CompletionContext {
-    std::vector<CQEntryWrapper> entryToPost;
-    std::vector<uint16_t> ivToPost;
+void Controller::postCompletionContext(CompletionContext *pData) {
+  DMAFunction send = [this](uint64_t, void *context) {
+    CompletionContext *pData = (CompletionContext *)context;
+
+    if (pData->ivToPost.size() > 0) {
+      std::sort(pData->ivToPost.begin(), pData->ivToPost.end());
+      auto end =
+          std::unique(pData->ivToPost.begin(), pData->ivToPost.end());
+
+      for (auto iter = pData->ivToPost.begin(); iter != end; iter++) {
+        // Update interrupt
+        updateInterrupt(*iter, true);
+      }
+    }
+
+    reserveCompletion();
+
+    releaseCompletionContext(pData);
   };
 
+  execute(CPU::NVME__CONTROLLER, CPU::COMPLETION, send, pData);
+}
+
+void Controller::releaseCompletionContext(CompletionContext *pData) {
+  if (pData == nullptr) {
+    return;
+  }
+
+  pendingCompletionContexts.remove(pData);
+
+  if (pData->submitContext) {
+    pData->submitContext->context = nullptr;
+    delete pData->submitContext;
+    pData->submitContext = nullptr;
+  }
+
+  delete pData;
+}
+
+void Controller::completion() {
   uint64_t tick = getTick();
   CQueue *pQueue = nullptr;
 
@@ -1720,26 +1759,8 @@ void Controller::completion() {
     pContext->counter--;
 
     if (pContext->counter == 0) {
-      DMAFunction send = [this](uint64_t, void *context) {
-        CompletionContext *pData = (CompletionContext *)context;
-
-        if (pData->ivToPost.size() > 0) {
-          std::sort(pData->ivToPost.begin(), pData->ivToPost.end());
-          auto end =
-              std::unique(pData->ivToPost.begin(), pData->ivToPost.end());
-
-          for (auto iter = pData->ivToPost.begin(); iter != end; iter++) {
-            // Update interrupt
-            updateInterrupt(*iter, true);
-          }
-        }
-
-        reserveCompletion();
-
-        delete pData;
-      };
-
-      execute(CPU::NVME__CONTROLLER, CPU::COMPLETION, send, pData);
+      pData->submitContext = nullptr;
+      postCompletionContext(pData);
 
       delete pContext;
     }
@@ -1749,6 +1770,8 @@ void Controller::completion() {
   CompletionContext *pData = new CompletionContext();
 
   submitContext->context = pData;
+  pData->submitContext = submitContext;
+  pendingCompletionContexts.push_back(pData);
 
   for (auto iter = lCQFIFO.begin(); iter != lCQFIFO.end();) {
     if (iter->submitAt <= tick) {
@@ -1815,8 +1838,15 @@ void Controller::completion() {
   }
 
   if (submitContext->counter == 0) {
-    delete pData;
+    pData->submitContext = nullptr;
     delete submitContext;
+
+    if (pData->ivToPost.size() > 0) {
+      postCompletionContext(pData);
+    }
+    else {
+      releaseCompletionContext(pData);
+    }
   }
 }
 

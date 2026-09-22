@@ -20,6 +20,9 @@
 #ifndef __FTL_FTL__
 #define __FTL_FTL__
 
+#include <vector>
+
+#include "csd/flash_array.hh"
 #include "dram/abstract_dram.hh"
 #include "pal/pal.hh"
 #include "util/simplessd.hh"
@@ -39,10 +42,21 @@ typedef struct {
   uint32_t pageCountToMaxPerf;  //!< # pages to fully utilize internal parallism
 } Parameter;
 
+typedef struct _PhysicalExtent {
+  uint64_t lpn;
+  uint64_t logicalOffset;
+  uint64_t length;
+  uint32_t blockIndex;
+  uint32_t pageIndex;
+  uint32_t ioUnitIndex;
+  uint64_t physicalOffset;
+} PhysicalExtent;
+
 class FTL : public StatObject {
  private:
   Parameter param;
   PAL::PAL *pPAL;
+  CSD::FlashArrayStore arrayStore;
 
   ConfigReader &conf;
   AbstractFTL *pFTL;
@@ -55,6 +69,8 @@ class FTL : public StatObject {
   void read(Request &, uint64_t &);
   void write(Request &, uint64_t &);
   void trim(Request &, uint64_t &);
+  bool readPayload(Request &, uint8_t *, uint64_t &, bool, bool);
+  bool getPhysicalExtents(Request &, std::vector<PhysicalExtent> &, bool);
 
   void format(LPNRange &, uint64_t &);
 

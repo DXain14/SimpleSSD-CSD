@@ -25,6 +25,7 @@
 #include <cinttypes>
 #include <string>
 
+#include "csd/config.hh"
 #include "cpu/config.hh"
 #include "dram/config.hh"
 #include "ftl/config.hh"
@@ -46,6 +47,7 @@ typedef enum {
   CONFIG_UFS,
   CONFIG_ICL,
   CONFIG_PAL,
+  CONFIG_CSD,
 } CONFIG_SECTION;
 
 class ConfigReader {
@@ -58,6 +60,7 @@ class ConfigReader {
   HIL::UFS::Config ufsConfig;
   ICL::Config iclConfig;
   PAL::Config palConfig;
+  CSD::Config csdConfig;
 
   static int parserHandler(void *, const char *, const char *, const char *);
 

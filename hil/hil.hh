@@ -58,6 +58,7 @@ class HIL : public StatObject {
 
   void read(Request &);
   void write(Request &);
+  bool readPayload(Request &, uint8_t *, uint64_t &, bool, bool);
   void flush(Request &);
   void trim(Request &);
 

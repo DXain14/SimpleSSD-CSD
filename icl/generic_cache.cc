@@ -813,6 +813,19 @@ void GenericCache::trim(LPNRange &range, uint64_t &tick) {
     tick = MAX(tick, finishedAt);
     tick += applyLatency(CPU::ICL__GENERIC_CACHE, CPU::TRIM);
   }
+  else {
+    FTL::Request reqInternal(lineCountInSuperPage);
+
+    for (uint64_t i = 0; i < range.nlp; i++) {
+      reqInternal.lpn = (range.slpn + i) / lineCountInSuperPage;
+      reqInternal.ioFlag.reset();
+      reqInternal.ioFlag.set((range.slpn + i) % lineCountInSuperPage);
+
+      pFTL->trim(reqInternal, tick);
+    }
+
+    tick += applyLatency(CPU::ICL__GENERIC_CACHE, CPU::TRIM);
+  }
 }
 
 void GenericCache::format(LPNRange &range, uint64_t &tick) {

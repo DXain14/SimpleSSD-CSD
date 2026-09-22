@@ -20,6 +20,7 @@
 #ifndef __HIL_NVME_SUBSYSTEM__
 #define __HIL_NVME_SUBSYSTEM__
 
+#include "csd/pu.hh"
 #include "hil/hil.hh"
 #include "hil/nvme/abstract_subsystem.hh"
 
@@ -32,6 +33,7 @@ namespace NVMe {
 class Subsystem : public AbstractSubsystem {
  protected:
   HIL *pHIL;
+  CSD::PU *pPU;
 
   std::list<Namespace *> lNamespaces;
   uint32_t queueAllocated;
@@ -45,6 +47,7 @@ class Subsystem : public AbstractSubsystem {
   uint64_t commandCount;
 
   void convertUnit(Namespace *, uint64_t, uint64_t, Request &);
+  bool readCompute(Namespace *, SQEntryWrapper &, RequestFunction &);
   bool createNamespace(uint32_t, Namespace::Information *);
   bool destroyNamespace(uint32_t);
   void fillIdentifyNamespace(uint8_t *, Namespace::Information *);
@@ -76,6 +79,11 @@ class Subsystem : public AbstractSubsystem {
 
   void read(Namespace *, uint64_t, uint64_t, DMAFunction &, void *);
   void write(Namespace *, uint64_t, uint64_t, DMAFunction &, void *);
+  void write(Namespace *, uint64_t, uint64_t, uint8_t *, uint64_t,
+             DMAFunction &, void *);
+  bool readPayload(Namespace *, uint64_t, uint64_t, uint8_t *, uint64_t &,
+                   bool, bool);
+  bool isCSDEnabled();
   void flush(Namespace *, DMAFunction &, void *);
   void trim(Namespace *, uint64_t, uint64_t, DMAFunction &, void *);
 

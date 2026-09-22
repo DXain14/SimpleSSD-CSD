@@ -99,6 +99,7 @@ void ICL::write(Request &req, uint64_t &tick) {
   uint64_t beginAt;
   uint64_t finishedAt = tick;
   uint64_t reqRemain = req.length;
+  uint64_t payloadOffset = 0;
   Request reqInternal;
 
   reqInternal.reqID = req.reqID;
@@ -110,8 +111,17 @@ void ICL::write(Request &req, uint64_t &tick) {
     reqInternal.reqSubID = i + 1;
     reqInternal.range.slpn = req.range.slpn + i;
     reqInternal.length = MIN(reqRemain, logicalPageSize - reqInternal.offset);
+    if (req.payload) {
+      reqInternal.payload = req.payload + payloadOffset;
+      reqInternal.payloadLength = reqInternal.length;
+    }
+    else {
+      reqInternal.payload = nullptr;
+      reqInternal.payloadLength = 0;
+    }
     pCache->write(reqInternal, beginAt);
     reqRemain -= reqInternal.length;
+    payloadOffset += reqInternal.length;
     reqInternal.offset = 0;
 
     finishedAt = MAX(finishedAt, beginAt);
@@ -125,6 +135,45 @@ void ICL::write(Request &req, uint64_t &tick) {
 
   tick = finishedAt;
   tick += applyLatency(CPU::ICL, CPU::WRITE);
+}
+
+bool ICL::readPayload(Request &req, uint8_t *buffer, uint64_t &tick,
+                      bool strict, bool applyFlashLatency) {
+  bool ret = true;
+  uint64_t reqRemain = req.length;
+  uint64_t bufferOffset = 0;
+  uint32_t lineCountInSuperPage = pFTL->getInfo()->pageSize / logicalPageSize;
+  Request reqInternal;
+
+  if (!buffer || lineCountInSuperPage == 0) {
+    return false;
+  }
+
+  reqInternal.reqID = req.reqID;
+  reqInternal.offset = req.offset;
+
+  for (uint64_t i = 0; i < req.range.nlp && reqRemain > 0; i++) {
+    reqInternal.reqSubID = i + 1;
+    reqInternal.range.slpn = req.range.slpn + i;
+    reqInternal.length = MIN(reqRemain, logicalPageSize - reqInternal.offset);
+
+    FTL::Request reqFTL(lineCountInSuperPage, reqInternal);
+
+    if (!pFTL->readPayload(reqFTL, buffer + bufferOffset, tick, strict,
+                           applyFlashLatency)) {
+      ret = false;
+
+      if (strict) {
+        break;
+      }
+    }
+
+    reqRemain -= reqInternal.length;
+    bufferOffset += reqInternal.length;
+    reqInternal.offset = 0;
+  }
+
+  return ret && reqRemain == 0;
 }
 
 void ICL::flush(LPNRange &range, uint64_t &tick) {

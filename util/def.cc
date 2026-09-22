@@ -35,6 +35,8 @@ Request::_Request()
       reqSubID(0),
       offset(0),
       length(0),
+      payload(nullptr),
+      payloadLength(0),
       finishedAt(0),
       context(nullptr) {}
 
@@ -43,6 +45,8 @@ Request::_Request(DMAFunction &f, void *c)
       reqSubID(0),
       offset(0),
       length(0),
+      payload(nullptr),
+      payloadLength(0),
       finishedAt(0),
       function(f),
       context(c) {}
@@ -55,26 +59,45 @@ bool Request::operator()(const Request &a, const Request &b) {
 
 namespace ICL {
 
-Request::_Request() : reqID(0), reqSubID(0), offset(0), length(0) {}
+Request::_Request()
+    : reqID(0),
+      reqSubID(0),
+      offset(0),
+      length(0),
+      payload(nullptr),
+      payloadLength(0) {}
 
 Request::_Request(HIL::Request &r)
     : reqID(r.reqID),
       reqSubID(r.reqSubID),
       offset(r.offset),
       length(r.length),
-      range(r.range) {}
+      range(r.range),
+      payload(r.payload),
+      payloadLength(r.payloadLength) {}
 
 }  // namespace ICL
 
 namespace FTL {
 
 Request::_Request(uint32_t iocount)
-    : reqID(0), reqSubID(0), lpn(0), ioFlag(iocount) {}
+    : reqID(0),
+      reqSubID(0),
+      lpn(0),
+      offset(0),
+      length(0),
+      payload(nullptr),
+      payloadLength(0),
+      ioFlag(iocount) {}
 
 Request::_Request(uint32_t iocount, ICL::Request &r)
     : reqID(r.reqID),
       reqSubID(r.reqSubID),
       lpn(r.range.slpn / iocount),
+      offset(r.offset),
+      length(r.length),
+      payload(r.payload),
+      payloadLength(r.payloadLength),
       ioFlag(iocount) {
   ioFlag.set(r.range.slpn % iocount);
 }

@@ -91,6 +91,11 @@ set(SRC_DRAM
   dram/config.cc
   dram/simple.cc
 )
+set(SRC_CSD
+  csd/config.cc
+  csd/flash_array.cc
+  csd/pu.cc
+)
 set(SRC_FTL_COMMON
   ftl/common/block.cc
 )
@@ -164,6 +169,7 @@ set(SRC_UTIL
 
 # Source group for MSVC
 SOURCE_GROUP("Source Files\\cpu" FILES ${SRC_CPU})
+SOURCE_GROUP("Source Files\\csd" FILES ${SRC_CSD})
 SOURCE_GROUP("Source Files\\dram" FILES ${SRC_DRAM})
 SOURCE_GROUP("Source Files\\ftl" FILES ${SRC_FTL})
 SOURCE_GROUP("Source Files\\ftl\\common" FILES ${SRC_FTL_COMMON})
@@ -181,6 +187,7 @@ SOURCE_GROUP("Source Files\\util" FILES ${SRC_UTIL})
 # Define library
 add_library(simplessd STATIC
   ${SRC_CPU}
+  ${SRC_CSD}
   ${SRC_DRAM}
   ${SRC_FTL}
   ${SRC_FTL_COMMON}

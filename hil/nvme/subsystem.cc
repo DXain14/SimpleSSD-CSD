@@ -48,6 +48,7 @@ const uint32_t lbaSize[nLBAFormat] = {
 Subsystem::Subsystem(Controller *ctrl, ConfigData &cfg)
     : AbstractSubsystem(ctrl, cfg),
       pHIL(nullptr),
+      pPU(nullptr),
       allocatedLogicalPages(0),
       commandCount(0) {}
 
@@ -57,10 +58,15 @@ Subsystem::~Subsystem() {
   }
 
   delete pHIL;
+  delete pPU;
 }
 
 void Subsystem::init() {
   pHIL = new HIL(conf);
+  if (conf.readBoolean(CONFIG_CSD, CSD::CSD_ENABLE)) {
+    pPU = new CSD::PU(conf);
+  }
+
   uint16_t nNamespaces =
       (uint16_t)conf.readUint(CONFIG_NVME, NVME_ENABLE_DEFAULT_NAMESPACE);
 
@@ -140,7 +146,7 @@ bool Subsystem::createNamespace(uint32_t nsid, Namespace::Information *info) {
 
   // Allocate LPN
   uint64_t requestedLogicalPages =
-      info->size / logicalPageSize * lbaSize[info->lbaFormatIndex];
+      info->size * lbaSize[info->lbaFormatIndex] / logicalPageSize;
   uint64_t unallocatedLogicalPages = totalLogicalPages - allocatedLogicalPages;
 
   if (requestedLogicalPages > unallocatedLogicalPages) {
@@ -375,6 +381,36 @@ void Subsystem::submitCommand(SQEntryWrapper &req, RequestFunction func) {
     }
   }
 
+  if (!processed && req.sqID != 0 && pPU &&
+      req.entry.dword0.opcode ==
+          conf.readUint(CONFIG_CSD, CSD::CSD_READ_COMPUTE_OPCODE)) {
+    if (req.entry.namespaceID < NSID_ALL) {
+      for (auto &iter : lNamespaces) {
+        if (iter->getNSID() == req.entry.namespaceID) {
+          auto pContext = new CommandContext(req, func);
+          DMAFunction doSubmit = [this, iter](uint64_t, void *context) {
+            auto pContext = (CommandContext *)context;
+
+            readCompute(iter, pContext->req, pContext->func);
+
+            delete pContext;
+          };
+
+          execute(CPU::NVME__NAMESPACE, CPU::SUBMIT_COMMAND, doSubmit,
+                  pContext);
+
+          return;
+        }
+      }
+    }
+
+    resp.makeStatus(false, false, TYPE_GENERIC_COMMAND_STATUS,
+                    STATUS_ABORT_INVALID_NAMESPACE);
+    func(resp);
+
+    return;
+  }
+
   // NVM commands or Namespace specific Admin commands
   if (!processed) {
     if (req.entry.namespaceID < NSID_ALL) {
@@ -423,6 +459,128 @@ void Subsystem::submitCommand(SQEntryWrapper &req, RequestFunction func) {
   }
 }
 
+bool Subsystem::readCompute(Namespace *ns, SQEntryWrapper &req,
+                            RequestFunction &func) {
+  struct CSDCommandContext {
+    Subsystem *subsystem;
+    Namespace *ns;
+    DMAInterface *dma;
+    RequestFunction function;
+    CQEntryWrapper resp;
+    uint64_t controlBytes;
+
+    CSDCommandContext(Subsystem *s, Namespace *n, RequestFunction &f,
+                      CQEntryWrapper &r, uint64_t bytes)
+        : subsystem(s),
+          ns(n),
+          dma(nullptr),
+          function(f),
+          resp(r),
+          controlBytes(bytes) {}
+  };
+
+  CQEntryWrapper resp(req);
+  uint64_t controlBytes = req.entry.dword10;
+
+  debugprint(LOG_HIL_NVME,
+             "NVM     | CSD READ_COMPUTE | SQ %u:%u | CID %u | NSID %-5d | "
+             "CTRL %" PRIu64,
+             req.sqID, req.sqUID, req.entry.dword0.commandID,
+             ns ? ns->getNSID() : 0, controlBytes);
+
+  if (!pPU) {
+    resp.makeStatus(true, false, TYPE_GENERIC_COMMAND_STATUS,
+                    STATUS_INVALID_OPCODE);
+    func(resp);
+
+    return true;
+  }
+
+  if (!ns || !ns->isAttached() || controlBytes == 0 ||
+      controlBytes > conf.readUint(CONFIG_CSD, CSD::CSD_MAX_CONTROL_BYTES)) {
+    resp.makeStatus(true, false, TYPE_GENERIC_COMMAND_STATUS,
+                    STATUS_INVALID_FIELD);
+    func(resp);
+
+    return true;
+  }
+
+  auto context = new CSDCommandContext(this, ns, func, resp, controlBytes);
+
+  DMAFunction begin = [](uint64_t, void *opaque) {
+    auto context = (CSDCommandContext *)opaque;
+
+    CSD::PU::MatrixReader reader =
+        [context](uint64_t slba, uint64_t bytes, uint8_t *buffer,
+                  uint64_t &tick, bool strict) -> CSD::PU::Status {
+      Namespace::Information *info = context->ns->getInfo();
+      uint64_t nlblk = (bytes + info->lbaSize - 1) / info->lbaSize;
+
+      if (bytes == 0 || nlblk == 0 || slba >= info->size ||
+          nlblk > info->size - slba) {
+        return CSD::PU::STATUS_LBA_RANGE;
+      }
+
+      if (!context->subsystem->readPayload(context->ns, slba, bytes, buffer,
+                                           tick, strict, true)) {
+        return CSD::PU::STATUS_UNMAPPED_PAYLOAD;
+      }
+
+      return CSD::PU::STATUS_SUCCESS;
+    };
+
+    CSD::PU::Completion completion =
+        [context](uint64_t, CSD::PU::Status status) {
+      switch (status) {
+        case CSD::PU::STATUS_SUCCESS:
+          break;
+        case CSD::PU::STATUS_DISABLED:
+          context->resp.makeStatus(true, false, TYPE_GENERIC_COMMAND_STATUS,
+                                   STATUS_INVALID_OPCODE);
+          break;
+        case CSD::PU::STATUS_UNMAPPED_PAYLOAD:
+          context->resp.makeStatus(
+              true, false, TYPE_MEDIA_AND_DATA_INTEGRITY_ERROR,
+              STATUS_DEALLOCATED_OR_UNWRITTEN_LOGICAL_BLOCK);
+          break;
+        case CSD::PU::STATUS_LBA_RANGE:
+          context->resp.makeStatus(true, false, TYPE_GENERIC_COMMAND_STATUS,
+                                   STATUS_LBA_OUT_OF_RANGE);
+          break;
+        case CSD::PU::STATUS_INVALID_DESCRIPTOR:
+          context->resp.makeStatus(true, false, TYPE_GENERIC_COMMAND_STATUS,
+                                   STATUS_INVALID_FIELD);
+          break;
+        case CSD::PU::STATUS_INTERNAL_ERROR:
+        default:
+          context->resp.makeStatus(true, false, TYPE_GENERIC_COMMAND_STATUS,
+                                   STATUS_INTERNAL_ERROR);
+          break;
+      }
+
+      context->function(context->resp);
+
+      delete context->dma;
+      delete context;
+    };
+
+    context->subsystem->pPU->submit(context->dma, context->controlBytes, reader,
+                                    completion);
+  };
+
+  if (req.useSGL) {
+    context->dma =
+        new SGL(cfgdata, begin, context, req.entry.data1, req.entry.data2);
+  }
+  else {
+    context->dma =
+        new PRPList(cfgdata, begin, context, req.entry.data1, req.entry.data2,
+                    context->controlBytes);
+  }
+
+  return true;
+}
+
 void Subsystem::getNVMCapacity(uint64_t &total, uint64_t &used) {
   total = totalLogicalPages * logicalPageSize;
   used = allocatedLogicalPages * logicalPageSize;
@@ -430,6 +588,10 @@ void Subsystem::getNVMCapacity(uint64_t &total, uint64_t &used) {
 
 uint32_t Subsystem::validNamespaceCount() {
   return (uint32_t)lNamespaces.size();
+}
+
+bool Subsystem::isCSDEnabled() {
+  return pPU != nullptr;
 }
 
 void Subsystem::read(Namespace *ns, uint64_t slba, uint64_t nlblk,
@@ -450,6 +612,12 @@ void Subsystem::read(Namespace *ns, uint64_t slba, uint64_t nlblk,
 
 void Subsystem::write(Namespace *ns, uint64_t slba, uint64_t nlblk,
                       DMAFunction &func, void *context) {
+  write(ns, slba, nlblk, nullptr, 0, func, context);
+}
+
+void Subsystem::write(Namespace *ns, uint64_t slba, uint64_t nlblk,
+                      uint8_t *payload, uint64_t payloadLength,
+                      DMAFunction &func, void *context) {
   Request *req = new Request(func, context);
   DMAFunction doWrite = [this](uint64_t, void *context) {
     auto req = (Request *)context;
@@ -460,8 +628,28 @@ void Subsystem::write(Namespace *ns, uint64_t slba, uint64_t nlblk,
   };
 
   convertUnit(ns, slba, nlblk, *req);
+  req->payload = payload;
+  req->payloadLength = payloadLength;
 
   execute(CPU::NVME__SUBSYSTEM, CPU::CONVERT_UNIT, doWrite, req);
+}
+
+bool Subsystem::readPayload(Namespace *ns, uint64_t slba, uint64_t length,
+                            uint8_t *buffer, uint64_t &tick, bool strict,
+                            bool applyFlashLatency) {
+  Namespace::Information *info = ns->getInfo();
+  uint64_t nlblk = (length + info->lbaSize - 1) / info->lbaSize;
+  Request req;
+
+  if (length == 0 || nlblk == 0 || slba >= info->size ||
+      nlblk > info->size - slba) {
+    return false;
+  }
+
+  convertUnit(ns, slba, nlblk, req);
+  req.length = length;
+
+  return pHIL->readPayload(req, buffer, tick, strict, applyFlashLatency);
 }
 
 void Subsystem::flush(Namespace *ns, DMAFunction &func, void *context) {
@@ -1299,18 +1487,27 @@ void Subsystem::getStatList(std::vector<Stats> &list, std::string prefix) {
   list.push_back(temp);
 
   pHIL->getStatList(list, prefix);
+  if (pPU) {
+    pPU->getStatList(list, prefix + "csd.pu.");
+  }
 }
 
 void Subsystem::getStatValues(std::vector<double> &values) {
   values.push_back(commandCount);
 
   pHIL->getStatValues(values);
+  if (pPU) {
+    pPU->getStatValues(values);
+  }
 }
 
 void Subsystem::resetStatValues() {
   commandCount = 0;
 
   pHIL->resetStatValues();
+  if (pPU) {
+    pPU->resetStatValues();
+  }
 }
 
 }  // namespace NVMe

@@ -26,6 +26,12 @@ namespace SimpleSSD {
 namespace HIL {
 
 HIL::HIL(ConfigReader &c) : conf(c), reqCount(0), lastScheduled(0) {
+  if (conf.readBoolean(CONFIG_CSD, CSD::CSD_ENABLE) &&
+      (conf.readBoolean(CONFIG_ICL, ICL::ICL_USE_READ_CACHE) ||
+       conf.readBoolean(CONFIG_ICL, ICL::ICL_USE_WRITE_CACHE))) {
+    panic("hil: CSD requires EnableReadCache=0 and EnableWriteCache=0");
+  }
+
   pICL = new ICL::ICL(conf);
 
   memset(&stat, 0, sizeof(stat));
@@ -99,6 +105,14 @@ void HIL::write(Request &req) {
   };
 
   execute(CPU::HIL, CPU::WRITE, doWrite, new Request(req));
+}
+
+bool HIL::readPayload(Request &req, uint8_t *buffer, uint64_t &tick,
+                      bool strict, bool applyFlashLatency) {
+  ICL::Request reqInternal(req);
+
+  return pICL->readPayload(reqInternal, buffer, tick, strict,
+                           applyFlashLatency);
 }
 
 void HIL::flush(Request &req) {

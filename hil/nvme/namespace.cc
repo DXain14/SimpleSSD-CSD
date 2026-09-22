@@ -306,50 +306,75 @@ void Namespace::write(SQEntryWrapper &req, RequestFunction &func) {
 
   if (!err) {
     DMAFunction doRead = [this](uint64_t tick, void *context) {
-      DMAFunction dmaDone = [this](uint64_t tick, void *context) {
+      DMAFunction finishWrite = [this](uint64_t tick, void *context) {
         IOContext *pContext = (IOContext *)context;
 
-        pContext->beginAt++;
+        debugprint(
+            LOG_HIL_NVME,
+            "NVM     | WRITE | CQ %u | SQ %u:%u | CID %u | NSID %-5d | "
+            "%" PRIX64 " + %d | %" PRIu64 " - %" PRIu64 " (%" PRIu64 ")",
+            pContext->resp.cqID, pContext->resp.entry.dword2.sqID,
+            pContext->resp.sqUID, pContext->resp.entry.dword3.commandID, nsid,
+            pContext->slba, pContext->nlb, pContext->tick, tick,
+            tick - pContext->tick);
+        pContext->function(pContext->resp);
 
-        if (pContext->beginAt == 2) {
-          debugprint(
-              LOG_HIL_NVME,
-              "NVM     | WRITE | CQ %u | SQ %u:%u | CID %u | NSID %-5d | "
-              "%" PRIX64 " + %d | %" PRIu64 " - %" PRIu64 " (%" PRIu64 ")",
-              pContext->resp.cqID, pContext->resp.entry.dword2.sqID,
-              pContext->resp.sqUID, pContext->resp.entry.dword3.commandID, nsid,
-              pContext->slba, pContext->nlb, pContext->tick, tick,
-              tick - pContext->tick);
-          pContext->function(pContext->resp);
-
-          if (pContext->buffer) {
+        if (pContext->buffer) {
+          if (pDisk) {
             pDisk->write(pContext->slba, pContext->nlb, pContext->buffer);
-
-            free(pContext->buffer);
           }
 
-          delete pContext->dma;
-          delete pContext;
+          free(pContext->buffer);
         }
+
+        delete pContext->dma;
+        delete pContext;
+      };
+
+      DMAFunction parallelDone =
+          [finishWrite](uint64_t tick, void *context) {
+        IOContext *pContext = (IOContext *)context;
+
+        pContext->completedEvents++;
+
+        if (pContext->completedEvents == 2) {
+          finishWrite(tick, context);
+        }
+      };
+
+      DMAFunction hostReadDone =
+          [this, finishWrite](uint64_t, void *context) mutable {
+        IOContext *pContext = (IOContext *)context;
+
+        pParent->write(this, pContext->slba, pContext->nlb, pContext->buffer,
+                       pContext->nlb * info.lbaSize, finishWrite, context);
       };
 
       IOContext *pContext = (IOContext *)context;
 
       pContext->tick = tick;
-      pContext->beginAt = 0;
+      pContext->completedEvents = 0;
 
-      if (pDisk) {
+      if (pParent->isCSDEnabled()) {
         pContext->buffer = (uint8_t *)calloc(pContext->nlb, info.lbaSize);
 
         pContext->dma->read(0, pContext->nlb * info.lbaSize, pContext->buffer,
-                            dmaDone, context);
+                            hostReadDone, context);
+      }
+      else if (pDisk) {
+        pContext->buffer = (uint8_t *)calloc(pContext->nlb, info.lbaSize);
+
+        pContext->dma->read(0, pContext->nlb * info.lbaSize, pContext->buffer,
+                            parallelDone, context);
+        pParent->write(this, pContext->slba, pContext->nlb, parallelDone,
+                       context);
       }
       else {
-        pContext->dma->read(0, pContext->nlb * info.lbaSize, nullptr, dmaDone,
-                            context);
+        pContext->dma->read(0, pContext->nlb * info.lbaSize, nullptr,
+                            parallelDone, context);
+        pParent->write(this, pContext->slba, pContext->nlb, parallelDone,
+                       context);
       }
-
-      pParent->write(this, pContext->slba, pContext->nlb, dmaDone, context);
     };
 
     IOContext *pContext = new IOContext(func, resp);
@@ -404,9 +429,9 @@ void Namespace::read(SQEntryWrapper &req, RequestFunction &func) {
       DMAFunction dmaDone = [this](uint64_t tick, void *context) {
         IOContext *pContext = (IOContext *)context;
 
-        pContext->beginAt++;
+        pContext->completedEvents++;
 
-        if (pContext->beginAt == 2) {
+        if (pContext->completedEvents == 2) {
           debugprint(
               LOG_HIL_NVME,
               "NVM     | READ  | CQ %u | SQ %u:%u | CID %u | NSID %-5d | "
@@ -430,13 +455,20 @@ void Namespace::read(SQEntryWrapper &req, RequestFunction &func) {
       IOContext *pContext = (IOContext *)context;
 
       pContext->tick = tick;
-      pContext->beginAt = 0;
+      pContext->completedEvents = 0;
 
       pParent->read(this, pContext->slba, pContext->nlb, dmaDone, pContext);
 
       pContext->buffer = (uint8_t *)calloc(pContext->nlb, info.lbaSize);
 
-      if (pDisk) {
+      if (pParent->isCSDEnabled()) {
+        uint64_t payloadTick = tick;
+
+        pParent->readPayload(this, pContext->slba,
+                             pContext->nlb * info.lbaSize, pContext->buffer,
+                             payloadTick, false, false);
+      }
+      else if (pDisk) {
         pDisk->read(pContext->slba, pContext->nlb, pContext->buffer);
       }
 
@@ -496,13 +528,12 @@ void Namespace::compare(SQEntryWrapper &req, RequestFunction &func) {
       DMAFunction dmaDone = [this](uint64_t tick, void *context) {
         CompareContext *pContext = (CompareContext *)context;
 
-        pContext->beginAt++;
+        pContext->completedEvents++;
 
-        if (pContext->beginAt == 2) {
-          // Compare buffer!
-          // Always success if no disk
-          if (pDisk && memcmp(pContext->buffer, pContext->hostContent,
-                              pContext->nlb * info.lbaSize) != 0) {
+        if (pContext->completedEvents == 2) {
+          if ((pParent->isCSDEnabled() || pDisk) &&
+              memcmp(pContext->buffer, pContext->hostContent,
+                     pContext->nlb * info.lbaSize) != 0) {
             pContext->resp.makeStatus(false, false,
                                       TYPE_MEDIA_AND_DATA_INTEGRITY_ERROR,
                                       STATUS_COMPARE_FAILURE);
@@ -534,14 +565,21 @@ void Namespace::compare(SQEntryWrapper &req, RequestFunction &func) {
       CompareContext *pContext = (CompareContext *)context;
 
       pContext->tick = tick;
-      pContext->beginAt = 0;
+      pContext->completedEvents = 0;
 
       pParent->read(this, pContext->slba, pContext->nlb, dmaDone, pContext);
 
       pContext->buffer = (uint8_t *)calloc(pContext->nlb, info.lbaSize);
       pContext->hostContent = (uint8_t *)calloc(pContext->nlb, info.lbaSize);
 
-      if (pDisk) {
+      if (pParent->isCSDEnabled()) {
+        uint64_t payloadTick = tick;
+
+        pParent->readPayload(this, pContext->slba,
+                             pContext->nlb * info.lbaSize, pContext->buffer,
+                             payloadTick, false, false);
+      }
+      else if (pDisk) {
         pDisk->read(pContext->slba, pContext->nlb, pContext->buffer);
       }
 

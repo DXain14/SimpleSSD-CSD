@@ -38,6 +38,7 @@ const char SECTION_ICL[] = "icl";
 const char SECTION_PAL[] = "pal";
 const char SECTION_SATA[] = "sata";
 const char SECTION_UFS[] = "ufs";
+const char SECTION_CSD[] = "csd";
 
 bool BaseConfig::convertBool(const char *value) {
   bool ret = false;
@@ -63,6 +64,7 @@ bool ConfigReader::init(std::string file) {
   palConfig.update();
   sataConfig.update();
   ufsConfig.update();
+  csdConfig.update();
 
   return true;
 }
@@ -85,6 +87,8 @@ int64_t ConfigReader::readInt(CONFIG_SECTION section, uint32_t idx) {
       return iclConfig.readInt(idx);
     case CONFIG_PAL:
       return palConfig.readInt(idx);
+    case CONFIG_CSD:
+      return csdConfig.readInt(idx);
     default:
       return 0;
   }
@@ -108,6 +112,8 @@ uint64_t ConfigReader::readUint(CONFIG_SECTION section, uint32_t idx) {
       return iclConfig.readUint(idx);
     case CONFIG_PAL:
       return palConfig.readUint(idx);
+    case CONFIG_CSD:
+      return csdConfig.readUint(idx);
     default:
       return 0;
   }
@@ -131,6 +137,8 @@ float ConfigReader::readFloat(CONFIG_SECTION section, uint32_t idx) {
       return iclConfig.readFloat(idx);
     case CONFIG_PAL:
       return palConfig.readFloat(idx);
+    case CONFIG_CSD:
+      return csdConfig.readFloat(idx);
     default:
       return 0.f;
   }
@@ -154,6 +162,8 @@ std::string ConfigReader::readString(CONFIG_SECTION section, uint32_t idx) {
       return iclConfig.readString(idx);
     case CONFIG_PAL:
       return palConfig.readString(idx);
+    case CONFIG_CSD:
+      return csdConfig.readString(idx);
     default:
       return std::string();
   }
@@ -177,6 +187,8 @@ bool ConfigReader::readBoolean(CONFIG_SECTION section, uint32_t idx) {
       return iclConfig.readBoolean(idx);
     case CONFIG_PAL:
       return palConfig.readBoolean(idx);
+    case CONFIG_CSD:
+      return csdConfig.readBoolean(idx);
     default:
       return false;
   }
@@ -210,6 +222,9 @@ int ConfigReader::parserHandler(void *context, const char *section,
   }
   else if (MATCH_SECTION(SECTION_PAL)) {
     handled = pThis->palConfig.setConfig(name, value);
+  }
+  else if (MATCH_SECTION(SECTION_CSD)) {
+    handled = pThis->csdConfig.setConfig(name, value);
   }
 
   if (!handled) {

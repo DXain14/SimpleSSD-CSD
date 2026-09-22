@@ -21,9 +21,11 @@
 #define __FTL_PAGE_MAPPING__
 
 #include <cinttypes>
+#include <list>
 #include <unordered_map>
 #include <vector>
 
+#include "csd/flash_array.hh"
 #include "ftl/abstract_ftl.hh"
 #include "ftl/common/block.hh"
 #include "ftl/ftl.hh"
@@ -36,6 +38,7 @@ namespace FTL {
 class PageMapping : public AbstractFTL {
  private:
   PAL::PAL *pPAL;
+  CSD::FlashArrayStore *pArrayStore;
 
   ConfigReader &conf;
 
@@ -71,13 +74,18 @@ class PageMapping : public AbstractFTL {
   float calculateWearLeveling();
   void calculateTotalPages(uint64_t &, uint64_t &);
 
+  bool readPayloadInternal(Request &, uint8_t *, uint64_t &, bool, bool);
+  void writePayloadInternal(Request &, uint32_t, uint32_t, uint32_t, uint32_t,
+                            uint32_t);
+
   void readInternal(Request &, uint64_t &);
   void writeInternal(Request &, uint64_t &, bool = true);
   void trimInternal(Request &, uint64_t &);
   void eraseInternal(PAL::Request &, uint64_t &);
 
  public:
-  PageMapping(ConfigReader &, Parameter &, PAL::PAL *, DRAM::AbstractDRAM *);
+  PageMapping(ConfigReader &, Parameter &, PAL::PAL *, DRAM::AbstractDRAM *,
+              CSD::FlashArrayStore *);
   ~PageMapping();
 
   bool initialize() override;
@@ -85,6 +93,9 @@ class PageMapping : public AbstractFTL {
   void read(Request &, uint64_t &) override;
   void write(Request &, uint64_t &) override;
   void trim(Request &, uint64_t &) override;
+  bool readPayload(Request &, uint8_t *, uint64_t &, bool, bool) override;
+  bool getPhysicalExtents(Request &, std::vector<PhysicalExtent> &,
+                          bool) override;
 
   void format(LPNRange &, uint64_t &) override;
 

@@ -21,6 +21,7 @@
 #define __FTL_ABSTRACT_FTL__
 
 #include <cinttypes>
+#include <vector>
 
 #include "ftl/ftl.hh"
 
@@ -51,6 +52,9 @@ class AbstractFTL : public StatObject {
   virtual void read(Request &, uint64_t &) = 0;
   virtual void write(Request &, uint64_t &) = 0;
   virtual void trim(Request &, uint64_t &) = 0;
+  virtual bool readPayload(Request &, uint8_t *, uint64_t &, bool, bool) = 0;
+  virtual bool getPhysicalExtents(Request &, std::vector<PhysicalExtent> &,
+                                  bool) = 0;
 
   virtual void format(LPNRange &, uint64_t &) = 0;
 

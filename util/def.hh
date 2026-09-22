@@ -45,6 +45,8 @@ typedef struct _Request {
   uint64_t offset;
   uint64_t length;
   LPNRange range;
+  uint8_t *payload;
+  uint64_t payloadLength;
 
   uint64_t finishedAt;
   DMAFunction function;
@@ -66,6 +68,8 @@ typedef struct _Request {
   uint64_t offset;
   uint64_t length;
   LPNRange range;
+  uint8_t *payload;
+  uint64_t payloadLength;
 
   _Request();
   _Request(HIL::Request &);
@@ -79,6 +83,10 @@ typedef struct _Request {
   uint64_t reqID;  // ID of ICL::Request
   uint64_t reqSubID;
   uint64_t lpn;
+  uint64_t offset;
+  uint64_t length;
+  uint8_t *payload;
+  uint64_t payloadLength;
   Bitset ioFlag;
 
   _Request(uint32_t);

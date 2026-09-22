@@ -24,6 +24,7 @@
 
 #include <list>
 #include <unordered_map>
+#include <vector>
 
 #include "hil/nvme/abstract_subsystem.hh"
 #include "hil/nvme/def.hh"
@@ -94,6 +95,15 @@ class Controller : public StatObject {
   std::list<SQEntryWrapper> lSQFIFO;  //!< Internal FIFO queue for submission
   std::list<CQEntryWrapper> lCQFIFO;  //!< Internal FIFO queue for completion
 
+  struct CompletionContext {
+    std::vector<CQEntryWrapper> entryToPost;
+    std::vector<uint16_t> ivToPost;
+    DMAContext *submitContext;
+
+    CompletionContext() : submitContext(nullptr) {}
+  };
+  std::list<CompletionContext *> pendingCompletionContexts;
+
   bool shutdownReserved;
 
   uint64_t aggregationTime;
@@ -113,6 +123,8 @@ class Controller : public StatObject {
   uint64_t lastWorkAt;
 
   bool checkQueue(SQueue *, DMAFunction &, void *);
+  void postCompletionContext(CompletionContext *);
+  void releaseCompletionContext(CompletionContext *);
 
  public:
   Controller(Interface *, ConfigReader &);

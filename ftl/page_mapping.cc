@@ -20,6 +20,7 @@
 #include "ftl/page_mapping.hh"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <random>
 
@@ -31,9 +32,11 @@ namespace SimpleSSD {
 namespace FTL {
 
 PageMapping::PageMapping(ConfigReader &c, Parameter &p, PAL::PAL *l,
-                         DRAM::AbstractDRAM *d)
+                         DRAM::AbstractDRAM *d,
+                         CSD::FlashArrayStore *arrayStore)
     : AbstractFTL(p, l, d),
       pPAL(l),
+      pArrayStore(arrayStore),
       conf(c),
       lastFreeBlock(param.pageCountToMaxPerf),
       lastFreeBlockIOMap(param.ioUnitInPage),
@@ -232,6 +235,53 @@ void PageMapping::trim(Request &req, uint64_t &tick) {
   tick += applyLatency(CPU::FTL__PAGE_MAPPING, CPU::TRIM);
 }
 
+bool PageMapping::readPayload(Request &req, uint8_t *buffer, uint64_t &tick,
+                              bool strict, bool applyFlashLatency) {
+  return readPayloadInternal(req, buffer, tick, strict, applyFlashLatency);
+}
+
+bool PageMapping::getPhysicalExtents(Request &req,
+                                     std::vector<PhysicalExtent> &extents,
+                                     bool strict) {
+  bool ret = true;
+  auto mappingList = table.find(req.lpn);
+
+  if (mappingList == table.end()) {
+    return !strict;
+  }
+
+  for (uint32_t idx = 0; idx < bitsetSize; idx++) {
+    if (req.ioFlag.test(idx) || !bRandomTweak) {
+      auto &mapping = mappingList->second.at(idx);
+
+      if (mapping.first >= param.totalPhysicalBlocks ||
+          mapping.second >= param.pagesInBlock) {
+        ret = false;
+
+        if (strict) {
+          return false;
+        }
+
+        continue;
+      }
+
+      PhysicalExtent extent;
+
+      extent.lpn = req.lpn;
+      extent.logicalOffset = req.offset;
+      extent.length = req.length;
+      extent.blockIndex = mapping.first;
+      extent.pageIndex = mapping.second;
+      extent.ioUnitIndex = idx;
+      extent.physicalOffset = req.offset;
+
+      extents.push_back(extent);
+    }
+  }
+
+  return ret;
+}
+
 void PageMapping::format(LPNRange &range, uint64_t &tick) {
   PAL::Request req(param.ioUnitInPage);
   std::vector<uint32_t> list;
@@ -245,6 +295,12 @@ void PageMapping::format(LPNRange &range, uint64_t &tick) {
       // Do trim
       for (uint32_t idx = 0; idx < bitsetSize; idx++) {
         auto &mapping = mappingList.at(idx);
+
+        if (mapping.first >= param.totalPhysicalBlocks ||
+            mapping.second >= param.pagesInBlock) {
+          continue;
+        }
+
         auto block = blocks.find(mapping.first);
 
         if (block == blocks.end()) {
@@ -553,10 +609,17 @@ void PageMapping::doGarbageCollection(std::vector<uint32_t> &blocksToReclaim,
 
             uint32_t newPageIdx = freeBlock->second.getNextWritePageIndex(idx);
 
+            beginAt = tick;
+
             mapping.first = newBlockIdx;
             mapping.second = newPageIdx;
 
             freeBlock->second.write(newPageIdx, lpns.at(idx), idx, beginAt);
+
+            if (pArrayStore) {
+              pArrayStore->copy(block->first, pageIndex, idx, newBlockIdx,
+                                newPageIdx, idx);
+            }
 
             // Issue Write
             req.blockIndex = newBlockIdx;
@@ -616,6 +679,124 @@ void PageMapping::doGarbageCollection(std::vector<uint32_t> &blocksToReclaim,
 
   tick = MAX(writeFinishedAt, eraseFinishedAt);
   tick += applyLatency(CPU::FTL__PAGE_MAPPING, CPU::DO_GARBAGE_COLLECTION);
+}
+
+bool PageMapping::readPayloadInternal(Request &req, uint8_t *buffer,
+                                      uint64_t &tick, bool strict,
+                                      bool applyFlashLatency) {
+  bool ret = true;
+  uint64_t finishedAt = tick;
+  uint64_t copied = 0;
+  PAL::Request palRequest(req);
+
+  if (!pArrayStore || !buffer || req.length == 0) {
+    return false;
+  }
+
+  auto mappingList = table.find(req.lpn);
+
+  if (mappingList == table.end()) {
+    memset(buffer, 0, req.length);
+
+    return !strict;
+  }
+
+  if (applyFlashLatency) {
+    if (bRandomTweak) {
+      pDRAM->read(&(*mappingList), 8 * req.ioFlag.count(), tick);
+    }
+    else {
+      pDRAM->read(&(*mappingList), 8, tick);
+    }
+  }
+
+  for (uint32_t idx = 0; idx < bitsetSize; idx++) {
+    if (req.ioFlag.test(idx) || !bRandomTweak) {
+      auto &mapping = mappingList->second.at(idx);
+
+      if (mapping.first >= param.totalPhysicalBlocks ||
+          mapping.second >= param.pagesInBlock ||
+          !pArrayStore->read(mapping.first, mapping.second, idx, req.offset,
+                             buffer + copied, req.length)) {
+        memset(buffer + copied, 0, req.length);
+        ret = false;
+
+        if (strict) {
+          return false;
+        }
+      }
+
+      if (applyFlashLatency && mapping.first < param.totalPhysicalBlocks &&
+          mapping.second < param.pagesInBlock) {
+        auto block = blocks.find(mapping.first);
+
+        if (block == blocks.end()) {
+          if (strict) {
+            return false;
+          }
+        }
+        else {
+          uint64_t beginAt = tick;
+
+          palRequest.blockIndex = mapping.first;
+          palRequest.pageIndex = mapping.second;
+
+          if (bRandomTweak) {
+            palRequest.ioFlag.reset();
+            palRequest.ioFlag.set(idx);
+          }
+          else {
+            palRequest.ioFlag.set();
+          }
+
+          block->second.read(palRequest.pageIndex, idx, beginAt);
+          pPAL->read(palRequest, beginAt);
+
+          finishedAt = MAX(finishedAt, beginAt);
+        }
+      }
+
+      copied += req.length;
+    }
+  }
+
+  if (applyFlashLatency) {
+    tick = finishedAt;
+    tick += applyLatency(CPU::FTL__PAGE_MAPPING, CPU::READ_INTERNAL);
+  }
+
+  return ret;
+}
+
+void PageMapping::writePayloadInternal(Request &req, uint32_t oldBlock,
+                                       uint32_t oldPage, uint32_t newBlock,
+                                       uint32_t newPage, uint32_t idx) {
+  uint32_t unitSize;
+  std::vector<uint8_t> image;
+
+  if (!pArrayStore || !req.payload) {
+    return;
+  }
+
+  unitSize = pArrayStore->getUnitSize();
+
+  if (unitSize == 0 || req.offset + req.length > unitSize ||
+      req.payloadLength < req.length) {
+    panic("ftl: Invalid CSD payload write size");
+  }
+
+  image.assign(unitSize, 0);
+
+  if ((req.offset > 0 || req.length < unitSize) &&
+      oldBlock < param.totalPhysicalBlocks && oldPage < param.pagesInBlock) {
+    pArrayStore->read(oldBlock, oldPage, idx, 0, image.data(), unitSize);
+  }
+
+  memcpy(image.data() + req.offset, req.payload, req.length);
+
+  if (!pArrayStore->write(newBlock, newPage, idx, 0, image.data(), unitSize)) {
+    panic("ftl: Failed to write CSD payload to flash array");
+  }
 }
 
 void PageMapping::readInternal(Request &req, uint64_t &tick) {
@@ -735,6 +916,8 @@ void PageMapping::writeInternal(Request &req, uint64_t &tick, bool sendToPAL) {
     if (req.ioFlag.test(idx) || !bRandomTweak) {
       uint32_t pageIndex = block->second.getNextWritePageIndex(idx);
       auto &mapping = mappingList->second.at(idx);
+      uint32_t oldBlock = mapping.first;
+      uint32_t oldPage = mapping.second;
 
       beginAt = tick;
 
@@ -757,6 +940,9 @@ void PageMapping::writeInternal(Request &req, uint64_t &tick, bool sendToPAL) {
       // update mapping to table
       mapping.first = block->first;
       mapping.second = pageIndex;
+
+      writePayloadInternal(req, oldBlock, oldPage, block->first, pageIndex,
+                           idx);
 
       if (sendToPAL) {
         palRequest.blockIndex = block->first;
@@ -825,6 +1011,12 @@ void PageMapping::trimInternal(Request &req, uint64_t &tick) {
     // Do trim
     for (uint32_t idx = 0; idx < bitsetSize; idx++) {
       auto &mapping = mappingList->second.at(idx);
+
+      if (mapping.first >= param.totalPhysicalBlocks ||
+          mapping.second >= param.pagesInBlock) {
+        continue;
+      }
+
       auto block = blocks.find(mapping.first);
 
       if (block == blocks.end()) {
@@ -832,6 +1024,10 @@ void PageMapping::trimInternal(Request &req, uint64_t &tick) {
       }
 
       block->second.invalidate(mapping.second, idx);
+
+      if (pArrayStore) {
+        pArrayStore->erase(mapping.first, mapping.second, idx);
+      }
     }
 
     // Remove mapping
@@ -859,6 +1055,10 @@ void PageMapping::eraseInternal(PAL::Request &req, uint64_t &tick) {
   block->second.erase();
 
   pPAL->erase(req, tick);
+
+  if (pArrayStore) {
+    pArrayStore->eraseBlock(req.blockIndex);
+  }
 
   // Check erase count
   uint32_t erasedCount = block->second.getEraseCount();
